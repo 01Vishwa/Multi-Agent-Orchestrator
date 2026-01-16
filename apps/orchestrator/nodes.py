@@ -1,32 +1,37 @@
 """
-LangGraph Nodes for Multi-Agent Orchestrator
+Advanced LangGraph Nodes with Parallel Execution and Tool Definitions
 
-Each node is a function that takes state and returns updated state.
-These nodes form the core logic of the orchestration workflow.
+This module implements:
+1. Parallel agent execution using asyncio
+2. LangChain Tool definitions for Django API access
+3. Relevant output extraction
+4. State machine transitions
 """
-import json
 import logging
 import time
-from typing import List, Dict, Any
+import asyncio
+import concurrent.futures
+from typing import Dict, List, Any, Optional
 from datetime import datetime
 
+from django.conf import settings
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.tools import tool, StructuredTool
+from pydantic import BaseModel, Field
 
-from django.conf import settings
-
+from apps.core.utils import extract_json_from_response
 from .state import (
-    OrchestratorState,
-    AgentResult,
-    EntityInfo,
-    AgentTask,
-    INTENT_CATEGORIES,
-    AGENT_CAPABILITIES,
-    DEPENDENCY_PATTERNS,
+    OrchestratorState, AgentState, AgentRequirement, ExecutionPlan,
+    ExtractedEntity, EntityType, create_parallel_execution_plan,
+    transition_to_routing, transition_to_executing, 
+    transition_to_answering, transition_to_error, transition_to_complete
 )
 
 logger = logging.getLogger(__name__)
 
+
+# === LLM Configuration ===
 
 def get_llm():
     """Get the configured LLM instance using GitHub Models API."""
@@ -34,406 +39,677 @@ def get_llm():
         model=settings.LLM_MODEL,
         api_key=settings.GITHUB_TOKEN,
         base_url=settings.LLM_BASE_URL,
-        temperature=0.1,  # Low temperature for consistency
+        temperature=0.1,
     )
 
 
-# ============================================================================
-# NODE: Analyze Query
-# ============================================================================
+# =============================================================================
+# TOOL DEFINITIONS FOR DJANGO API ACCESS
+# =============================================================================
 
-ANALYZE_PROMPT = """You are an intent classifier for a multi-product e-commerce platform.
-The platform has 4 products:
-1. ShopCore - E-commerce (orders, products, users)
-2. ShipStream - Logistics (shipments, tracking, warehouses)
-3. PayGuard - FinTech (wallets, transactions, refunds)
-4. CareDesk - Customer Support (tickets, messages, surveys)
-
-Analyze the following customer query and extract:
-1. The primary intent (what they want to do)
-2. Entities mentioned (product names, order IDs, etc.)
-3. Which agents (products) are needed to answer this query
-
-Customer Query: {query}
-
-Conversation History:
-{history}
-
-Respond in JSON format:
-{{
-    "intent": "one of: order_status, delivery_tracking, refund_status, refund_request, ticket_status, ticket_create, payment_issue, wallet_balance, product_inquiry, account_info, general_query, multi_domain",
-    "intent_confidence": 0.0 to 1.0,
-    "entities": [
-        {{"entity_type": "type", "value": "value", "confidence": 0.0 to 1.0}}
-    ],
-    "required_agents": ["list of: shopcore, shipstream, payguard, caredesk"],
-    "reasoning": "brief explanation of your analysis"
-}}
-"""
+class OrderQueryInput(BaseModel):
+    """Input schema for order queries"""
+    product_name: Optional[str] = Field(None, description="Product name to search for")
+    order_id: Optional[str] = Field(None, description="Specific order ID")
+    user_id: Optional[str] = Field(None, description="User ID to filter orders")
+    status: Optional[str] = Field(None, description="Order status filter")
+    limit: int = Field(5, description="Maximum results to return")
 
 
-def analyze_query(state: OrchestratorState) -> Dict[str, Any]:
+class ShipmentQueryInput(BaseModel):
+    """Input schema for shipment queries"""
+    order_id: Optional[str] = Field(None, description="Order ID to find shipment for")
+    tracking_number: Optional[str] = Field(None, description="Tracking number")
+    include_events: bool = Field(True, description="Include tracking events")
+
+
+class TransactionQueryInput(BaseModel):
+    """Input schema for transaction queries"""
+    user_id: Optional[str] = Field(None, description="User ID for transactions")
+    order_id: Optional[str] = Field(None, description="Order ID for refunds")
+    transaction_type: Optional[str] = Field(None, description="Type: payment, refund")
+    limit: int = Field(5, description="Maximum results")
+
+
+class TicketQueryInput(BaseModel):
+    """Input schema for ticket queries"""
+    user_id: Optional[str] = Field(None, description="User ID for tickets")
+    order_id: Optional[str] = Field(None, description="Related order ID")
+    status: Optional[str] = Field(None, description="Ticket status filter")
+    include_messages: bool = Field(False, description="Include ticket messages")
+
+
+@tool
+def query_orders(
+    product_name: str = None,
+    order_id: str = None,
+    user_id: str = None,
+    status: str = None,
+    limit: int = 5
+) -> Dict[str, Any]:
     """
-    Analyze the user query to determine intent, extract entities,
-    and identify which agents are needed.
+    Query ShopCore database for orders.
+    Use this when you need order information, status, or product details.
     """
-    logger.info(f"Analyzing query: {state['user_query'][:100]}...")
+    from apps.shopcore.models import Order
     
-    llm = get_llm()
+    orders = Order.objects.select_related('user', 'product').all()
     
-    # Format conversation history
-    history_str = ""
-    if state.get('conversation_history'):
-        for msg in state['conversation_history'][-5:]:  # Last 5 messages
-            role = msg.get('role', 'user')
-            content = msg.get('content', '')
-            history_str += f"{role}: {content}\n"
-    else:
-        history_str = "No previous conversation"
+    if product_name:
+        orders = orders.filter(product__name__icontains=product_name)
+    if order_id:
+        orders = orders.filter(id=order_id)
+    if user_id:
+        orders = orders.filter(user_id=user_id)
+    if status:
+        orders = orders.filter(status=status)
     
-    prompt = ANALYZE_PROMPT.format(
-        query=state['user_query'],
-        history=history_str
-    )
-    
-    try:
-        response = llm.invoke([
-            SystemMessage(content="You are a precise intent classifier. Always respond in valid JSON."),
-            HumanMessage(content=prompt)
-        ])
-        
-        # Parse the response
-        content = response.content
-        # Extract JSON from response (handle markdown code blocks)
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0]
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0]
-        
-        result = json.loads(content)
-        
-        # Convert entities to proper format
-        entities = [
-            EntityInfo(
-                entity_type=e.get('entity_type', 'unknown'),
-                value=e.get('value', ''),
-                confidence=e.get('confidence', 0.5)
-            )
-            for e in result.get('entities', [])
-        ]
-        
-        logger.info(f"Intent detected: {result.get('intent')} with confidence {result.get('intent_confidence')}")
-        logger.info(f"Required agents: {result.get('required_agents')}")
-        
-        return {
-            "intent": result.get('intent', 'general_query'),
-            "intent_confidence": result.get('intent_confidence', 0.5),
-            "entities": entities,
-            "required_agents": result.get('required_agents', ['shopcore']),
-            "status": "analyzing",
-        }
-        
-    except Exception as e:
-        logger.error(f"Error analyzing query: {e}")
-        return {
-            "intent": "general_query",
-            "intent_confidence": 0.3,
-            "entities": [],
-            "required_agents": ["shopcore"],  # Default to shopcore
-            "status": "analyzing",
-            "error_message": str(e),
-        }
-
-
-# ============================================================================
-# NODE: Create Execution Plan
-# ============================================================================
-
-def create_execution_plan(state: OrchestratorState) -> Dict[str, Any]:
-    """
-    Create an ordered execution plan based on required agents and dependencies.
-    """
-    logger.info(f"Creating execution plan for agents: {state['required_agents']}")
-    
-    required = set(state['required_agents'])
-    
-    # Build dependency graph
-    dependency_graph = {}
-    for agent in required:
-        deps = [d for d in DEPENDENCY_PATTERNS.get(agent, []) if d in required]
-        dependency_graph[agent] = deps
-    
-    # Topological sort for execution order
-    execution_order = []
-    visited = set()
-    temp_visited = set()
-    
-    def visit(agent):
-        if agent in temp_visited:
-            # Circular dependency - just continue
-            return
-        if agent in visited:
-            return
-        
-        temp_visited.add(agent)
-        for dep in dependency_graph.get(agent, []):
-            visit(dep)
-        temp_visited.remove(agent)
-        visited.add(agent)
-        execution_order.append(agent)
-    
-    for agent in required:
-        visit(agent)
-    
-    # Create tasks with proper ordering
-    execution_plan = []
-    entities_context = {e['entity_type']: e['value'] for e in state.get('entities', [])}
-    
-    for priority, agent in enumerate(execution_order):
-        task = AgentTask(
-            agent_name=agent,
-            task_description=f"Query {agent} database to help answer: {state['user_query']}",
-            depends_on=dependency_graph.get(agent, []),
-            context=entities_context,
-            priority=priority
-        )
-        execution_plan.append(task)
-    
-    logger.info(f"Execution order: {execution_order}")
-    
-    return {
-        "execution_plan": execution_plan,
-        "dependency_graph": dependency_graph,
-        "pending_agents": list(execution_order),
-        "completed_agents": [],
-        "status": "planning",
-    }
-
-
-# ============================================================================
-# NODE: Execute Agents
-# ============================================================================
-
-def execute_agents(state: OrchestratorState) -> Dict[str, Any]:
-    """
-    Execute the next agent(s) in the execution plan.
-    This handles both sequential (dependent) and parallel (independent) execution.
-    """
-    from apps.shopcore.agent import ShopCoreAgent
-    from apps.shipstream.agent import ShipStreamAgent
-    from apps.payguard.agent import PayGuardAgent
-    from apps.caredesk.agent import CareDeSkAgent
-    
-    logger.info(f"Executing agents. Pending: {state['pending_agents']}")
-    
-    if not state['pending_agents']:
-        return {"status": "synthesizing"}
-    
-    # Get agents that can be executed (all dependencies satisfied)
-    completed = set(state['completed_agents'])
-    ready_agents = []
-    
-    for agent_name in state['pending_agents']:
-        deps = state['dependency_graph'].get(agent_name, [])
-        if all(d in completed for d in deps):
-            ready_agents.append(agent_name)
-    
-    if not ready_agents:
-        logger.warning("No agents ready to execute - possible circular dependency")
-        return {
-            "status": "error",
-            "error_message": "No agents ready to execute"
-        }
-    
-    # Agent instances
-    agents = {
-        "shopcore": ShopCoreAgent(),
-        "shipstream": ShipStreamAgent(),
-        "payguard": PayGuardAgent(),
-        "caredesk": CareDeSkAgent(),
-    }
-    
-    # Execute ready agents
     results = []
-    new_context = dict(state.get('accumulated_context', {}))
+    for order in orders[:limit]:
+        results.append({
+            'order_id': str(order.id),
+            'user_name': order.user.name,
+            'user_id': str(order.user_id),
+            'product_name': order.product.name,
+            'product_id': str(order.product_id),
+            'status': order.status,
+            'total_amount': str(order.total_amount),
+            'order_date': order.order_date.isoformat(),
+            'quantity': order.quantity
+        })
     
-    for agent_name in ready_agents:
-        agent = agents.get(agent_name)
-        if not agent:
-            logger.error(f"Unknown agent: {agent_name}")
-            continue
-        
-        # Find the task for this agent
-        task = next(
-            (t for t in state['execution_plan'] if t['agent_name'] == agent_name),
-            None
-        )
-        
-        if not task:
-            continue
-        
-        # Merge context from previous agents
-        task_context = {**task['context'], **new_context}
-        
-        logger.info(f"Executing {agent_name} with context: {task_context}")
-        
-        start_time = time.time()
-        try:
-            result = agent.execute(
-                query=state['user_query'],
-                context=task_context,
-                entities=state.get('entities', [])
-            )
-            execution_time = int((time.time() - start_time) * 1000)
-            
-            agent_result = AgentResult(
-                agent_name=agent_name,
-                success=result.get('success', False),
-                data=result.get('data', {}),
-                sql_query=result.get('sql_query'),
-                error=result.get('error'),
-                execution_time_ms=execution_time
-            )
-            results.append(agent_result)
-            
-            # Update context with results from this agent
-            if result.get('success') and result.get('data'):
-                new_context[f"{agent_name}_result"] = result['data']
-                
-                # Extract key IDs for subsequent agents
-                data = result['data']
-                if isinstance(data, list) and len(data) > 0:
-                    first = data[0] if isinstance(data[0], dict) else {}
-                    for key in ['order_id', 'user_id', 'tracking_number', 'ticket_id']:
-                        if key in first:
-                            new_context[key] = first[key]
-                elif isinstance(data, dict):
-                    for key in ['order_id', 'user_id', 'tracking_number', 'ticket_id']:
-                        if key in data:
-                            new_context[key] = data[key]
-            
-            logger.info(f"{agent_name} completed in {execution_time}ms")
-            
-        except Exception as e:
-            logger.error(f"Error executing {agent_name}: {e}")
-            results.append(AgentResult(
-                agent_name=agent_name,
-                success=False,
-                data={},
-                sql_query=None,
-                error=str(e),
-                execution_time_ms=0
-            ))
+    return {'orders': results, 'count': len(results)}
+
+
+@tool
+def query_shipments(
+    order_id: str = None,
+    tracking_number: str = None,
+    include_events: bool = True
+) -> Dict[str, Any]:
+    """
+    Query ShipStream database for shipment and tracking information.
+    Use this when you need delivery status, tracking, or package location.
+    """
+    from apps.shipstream.models import Shipment, TrackingEvent
     
-    # Update pending/completed lists
-    new_pending = [a for a in state['pending_agents'] if a not in ready_agents]
-    new_completed = state['completed_agents'] + ready_agents
+    shipments = Shipment.objects.select_related('current_warehouse').all()
     
-    # Determine next status
-    next_status = "executing" if new_pending else "synthesizing"
+    if order_id:
+        shipments = shipments.filter(order_id=order_id)
+    if tracking_number:
+        shipments = shipments.filter(tracking_number=tracking_number)
     
-    return {
-        "agent_results": results,
-        "pending_agents": new_pending,
-        "completed_agents": new_completed,
-        "accumulated_context": new_context,
-        "status": next_status,
-    }
+    results = []
+    for shipment in shipments[:5]:
+        ship_data = {
+            'shipment_id': str(shipment.id),
+            'order_id': str(shipment.order_id),
+            'tracking_number': shipment.tracking_number,
+            'status': shipment.current_status,
+            'current_location': shipment.current_warehouse.location if shipment.current_warehouse else 'In Transit',
+            'estimated_arrival': shipment.estimated_arrival.isoformat() if shipment.estimated_arrival else None
+        }
+        
+        if include_events:
+            events = TrackingEvent.objects.filter(shipment=shipment).order_by('-timestamp')[:5]
+            ship_data['tracking_events'] = [
+                {
+                    'timestamp': e.timestamp.isoformat(),
+                    'status': e.status_update,
+                    'location': e.location or (e.warehouse.location if e.warehouse else 'Unknown')
+                }
+                for e in events
+            ]
+        
+        results.append(ship_data)
+    
+    return {'shipments': results, 'count': len(results)}
 
 
-# ============================================================================
-# NODE: Synthesize Response
-# ============================================================================
+@tool
+def query_transactions(
+    user_id: str = None,
+    order_id: str = None,
+    transaction_type: str = None,
+    limit: int = 5
+) -> Dict[str, Any]:
+    """
+    Query PayGuard database for transaction and refund information.
+    Use this when you need payment status, refunds, or wallet balance.
+    """
+    from apps.payguard.models import Transaction, Wallet
+    
+    transactions = Transaction.objects.select_related('wallet').order_by('-created_at')
+    
+    if user_id:
+        transactions = transactions.filter(wallet__user_id=user_id)
+    if order_id:
+        transactions = transactions.filter(order_id=order_id)
+    if transaction_type:
+        transactions = transactions.filter(transaction_type=transaction_type)
+    
+    results = []
+    for trans in transactions[:limit]:
+        results.append({
+            'transaction_id': str(trans.id),
+            'type': trans.transaction_type,
+            'status': trans.status,
+            'amount': str(trans.amount),
+            'order_id': str(trans.order_id) if trans.order_id else None,
+            'date': trans.created_at.isoformat(),
+            'reference': trans.reference_number
+        })
+    
+    return {'transactions': results, 'count': len(results)}
 
-SYNTHESIZE_PROMPT = """You are a helpful customer support assistant for OmniLife, a multi-product e-commerce platform.
 
-Based on the query results from our internal systems, synthesize a clear, helpful response for the customer.
+@tool
+def query_tickets(
+    user_id: str = None,
+    order_id: str = None,
+    status: str = None,
+    include_messages: bool = False
+) -> Dict[str, Any]:
+    """
+    Query CareDesk database for support ticket information.
+    Use this when you need ticket status, agent assignment, or support history.
+    """
+    from apps.caredesk.models import Ticket, TicketMessage
+    
+    tickets = Ticket.objects.all().order_by('-created_at')
+    
+    if user_id:
+        tickets = tickets.filter(user_id=user_id)
+    if order_id:
+        tickets = tickets.filter(reference_id=order_id, reference_type='order')
+    if status:
+        tickets = tickets.filter(status=status)
+    
+    results = []
+    for ticket in tickets[:5]:
+        ticket_data = {
+            'ticket_id': str(ticket.id),
+            'subject': ticket.subject,
+            'status': ticket.status,
+            'priority': ticket.priority,
+            'issue_type': ticket.issue_type,
+            'assigned_to': ticket.assigned_agent_name or 'Unassigned',
+            'created_at': ticket.created_at.isoformat()
+        }
+        
+        if include_messages:
+            messages = TicketMessage.objects.filter(ticket=ticket).order_by('-created_at')[:3]
+            ticket_data['messages'] = [
+                {
+                    'sender': m.sender_name,
+                    'content': m.content[:100] + '...' if len(m.content) > 100 else m.content,
+                    'sent_at': m.created_at.isoformat()
+                }
+                for m in messages
+            ]
+        
+        results.append(ticket_data)
+    
+    return {'tickets': results, 'count': len(results)}
 
-Customer Query: {query}
 
-Data Retrieved:
-{agent_data}
+# Get all available tools
+AVAILABLE_TOOLS = [query_orders, query_shipments, query_transactions, query_tickets]
 
-Guidelines:
-1. Be conversational and friendly
-2. Directly answer the customer's question
-3. Include specific details (order IDs, tracking numbers, dates, amounts)
-4. If some information is missing, acknowledge it and offer next steps
-5. Don't mention internal system names (ShopCore, ShipStream, etc.)
-6. Keep the response concise but complete
 
-Respond with a natural, helpful message for the customer.
+# =============================================================================
+# NODE IMPLEMENTATIONS WITH STATE MACHINE
+# =============================================================================
+
+ANALYSIS_PROMPT = """You are an intent classifier for a multi-system customer support platform.
+Analyze the user query and extract:
+
+1. **intent**: The primary intent (order_inquiry, delivery_tracking, refund_request, ticket_status, payment_history, general_inquiry)
+2. **intent_confidence**: Confidence score 0.0-1.0
+3. **entities**: List of extracted entities with type and value
+4. **required_agents**: List of agents needed with dependencies
+
+Available agents:
+- shopcore: Orders, products, users
+- shipstream: Shipments, tracking, delivery (depends on shopcore for order_id)
+- payguard: Payments, refunds, wallets (depends on shopcore for user_id)
+- caredesk: Support tickets (depends on shopcore for user_id/order_id)
+
+For queries needing multiple agents, specify dependencies correctly.
+Example: "track my Gaming Monitor order" needs shopcore first (to get order_id), then shipstream.
+
+Return JSON:
+{
+    "intent": "string",
+    "intent_confidence": 0.0-1.0,
+    "entities": [{"type": "product_name|order_id|user_id", "value": "string"}],
+    "required_agents": [
+        {"agent": "shopcore", "reason": "Find order", "depends_on": []},
+        {"agent": "shipstream", "reason": "Track shipment", "depends_on": ["shopcore"]}
+    ],
+    "complexity": 1-10
+}
 """
 
 
-def synthesize_response(state: OrchestratorState) -> Dict[str, Any]:
+def analyze_query(state: OrchestratorState) -> OrchestratorState:
     """
-    Synthesize a natural language response from all agent results.
+    LISTENING → ROUTING transition
+    Analyze user query, extract intent, entities, and determine required agents.
     """
-    logger.info("Synthesizing final response")
+    start_time = time.time()
     
-    llm = get_llm()
+    # Transition to ROUTING state
+    state = transition_to_routing(state)
     
-    # Format agent results for the prompt
-    agent_data_parts = []
-    for result in state.get('agent_results', []):
-        if result['success']:
-            agent_data_parts.append(f"From {result['agent_name']}:\n{json.dumps(result['data'], indent=2, default=str)}")
-        else:
-            agent_data_parts.append(f"From {result['agent_name']}: Error - {result['error']}")
-    
-    agent_data = "\n\n".join(agent_data_parts) if agent_data_parts else "No data retrieved"
-    
-    prompt = SYNTHESIZE_PROMPT.format(
-        query=state['user_query'],
-        agent_data=agent_data
-    )
+    user_query = state["user_query"]
+    logger.info(f"[ROUTING] Analyzing query: {user_query[:50]}...")
     
     try:
+        llm = get_llm()
         response = llm.invoke([
-            SystemMessage(content="You are a helpful customer support assistant."),
-            HumanMessage(content=prompt)
+            SystemMessage(content=ANALYSIS_PROMPT),
+            HumanMessage(content=f"User query: {user_query}")
         ])
         
-        final_response = response.content
+        result = extract_json_from_response(response.content)
         
-        logger.info(f"Response synthesized: {final_response[:100]}...")
+        if result:
+            state["intent"] = result.get("intent", "general_inquiry")
+            state["intent_confidence"] = result.get("intent_confidence", 0.5)
+            
+            # Extract entities
+            entities = []
+            for entity in result.get("entities", []):
+                entity_type = entity.get("type", "unknown")
+                try:
+                    et = EntityType(entity_type)
+                except ValueError:
+                    et = EntityType.PRODUCT_NAME
+                entities.append(ExtractedEntity(
+                    entity_type=et,
+                    value=entity.get("value", ""),
+                    confidence=0.9
+                ))
+            state["entities"] = entities
+            
+            # Extract required agents
+            required_agents = []
+            for agent in result.get("required_agents", []):
+                required_agents.append(AgentRequirement(
+                    agent_name=agent.get("agent", "shopcore"),
+                    reason=agent.get("reason", ""),
+                    depends_on=agent.get("depends_on", [])
+                ))
+            state["required_agents"] = required_agents
+            state["complexity_score"] = result.get("complexity", 5)
+            
+    except Exception as e:
+        logger.error(f"[ROUTING] Analysis error: {e}")
+        # Fallback to shopcore
+        state["intent"] = "general_inquiry"
+        state["intent_confidence"] = 0.3
+        state["required_agents"] = [AgentRequirement(
+            agent_name="shopcore",
+            reason="Default fallback",
+            depends_on=[]
+        )]
+    
+    state["execution_times"]["analysis"] = (time.time() - start_time) * 1000
+    logger.info(f"[ROUTING] Identified agents: {[a.agent_name for a in state.get('required_agents', [])]}")
+    
+    return state
+
+
+def create_execution_plan(state: OrchestratorState) -> OrchestratorState:
+    """
+    Create parallel execution plan based on agent dependencies.
+    """
+    required_agents = state.get("required_agents", [])
+    
+    if not required_agents:
+        required_agents = [AgentRequirement(agent_name="shopcore", reason="Default")]
+        state["required_agents"] = required_agents
+    
+    # Create parallel execution plan
+    plan = create_parallel_execution_plan(required_agents)
+    state["execution_plan"] = plan
+    state["parallel_batches"] = plan.batches
+    state["current_batch_index"] = 0
+    
+    logger.info(f"[PLAN] Created execution plan with {len(plan.batches)} batches: {plan.batches}")
+    
+    return state
+
+
+def execute_agents_parallel(state: OrchestratorState) -> OrchestratorState:
+    """
+    ROUTING → EXECUTING transition
+    Execute agents in parallel batches for reduced latency.
+    """
+    start_time = time.time()
+    
+    # Transition to EXECUTING state
+    state = transition_to_executing(state)
+    
+    plan = state.get("execution_plan")
+    if not plan:
+        logger.warning("[EXECUTING] No execution plan, creating default")
+        state = create_execution_plan(state)
+        plan = state["execution_plan"]
+    
+    user_query = state["user_query"]
+    entities = state.get("entities", [])
+    
+    # Initialize result containers
+    if "agent_results" not in state:
+        state["agent_results"] = {}
+    if "accumulated_context" not in state:
+        state["accumulated_context"] = {}
+    
+    # Execute each batch
+    for batch_idx, batch in enumerate(plan.batches):
+        batch_start = time.time()
+        logger.info(f"[EXECUTING] Batch {batch_idx + 1}/{len(plan.batches)}: {batch}")
         
-        return {
-            "final_response": final_response,
-            "response_confidence": 0.9 if all(r['success'] for r in state.get('agent_results', [])) else 0.6,
-            "status": "complete",
-            "end_time": datetime.utcnow().isoformat(),
-        }
+        # Build context from previous results
+        context = dict(state["accumulated_context"])
+        
+        # Pass relevant entities to context
+        for entity in entities:
+            if entity.entity_type == EntityType.ORDER_ID:
+                context["order_id"] = entity.value
+            elif entity.entity_type == EntityType.USER_ID:
+                context["user_id"] = entity.value
+            elif entity.entity_type == EntityType.PRODUCT_NAME:
+                context["product_name"] = entity.value
+        
+        # Execute agents in this batch in parallel
+        batch_results = execute_batch_parallel(batch, user_query, context, entities)
+        
+        # Accumulate results
+        for agent_name, result in batch_results.items():
+            state["agent_results"][agent_name] = result
+            state["execution_times"][agent_name] = result.get("execution_time_ms", 0)
+            
+            # Extract relevant data for next batch
+            if result.get("success") and result.get("data"):
+                data = result["data"]
+                if isinstance(data, list) and len(data) > 0:
+                    first_item = data[0]
+                    if "order_id" in first_item:
+                        context["order_id"] = first_item["order_id"]
+                    if "user_id" in first_item:
+                        context["user_id"] = first_item["user_id"]
+                    
+                    # Store for context passing
+                    state["accumulated_context"][f"{agent_name}_result"] = data
+        
+        logger.info(f"[EXECUTING] Batch {batch_idx + 1} completed in {(time.time() - batch_start)*1000:.0f}ms")
+    
+    state["execution_times"]["total_execution"] = (time.time() - start_time) * 1000
+    state["agents_used"] = list(state["agent_results"].keys())
+    
+    logger.info(f"[EXECUTING] All batches complete. Total time: {state['execution_times']['total_execution']:.0f}ms")
+    
+    return state
+
+
+def execute_batch_parallel(
+    agents: List[str],
+    query: str,
+    context: Dict[str, Any],
+    entities: List[ExtractedEntity]
+) -> Dict[str, Dict]:
+    """
+    Execute a batch of agents in parallel using ThreadPoolExecutor.
+    """
+    results = {}
+    
+    def execute_single_agent(agent_name: str) -> tuple:
+        start = time.time()
+        try:
+            agent = get_agent_instance(agent_name)
+            entity_dicts = [{"entity_type": e.entity_type.value, "value": e.value} for e in entities]
+            result = agent.execute(query, context, entity_dicts)
+            result["execution_time_ms"] = (time.time() - start) * 1000
+            return (agent_name, result)
+        except Exception as e:
+            logger.error(f"[PARALLEL] Agent {agent_name} error: {e}")
+            return (agent_name, {
+                "success": False,
+                "error": str(e),
+                "data": [],
+                "execution_time_ms": (time.time() - start) * 1000
+            })
+    
+    # Use ThreadPoolExecutor for parallel execution
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(execute_single_agent, agent): agent for agent in agents}
+        
+        for future in concurrent.futures.as_completed(futures):
+            agent_name, result = future.result()
+            results[agent_name] = result
+    
+    return results
+
+
+def get_agent_instance(agent_name: str):
+    """Get agent instance by name."""
+    if agent_name == "shopcore":
+        from apps.shopcore.agent import ShopCoreAgent
+        return ShopCoreAgent()
+    elif agent_name == "shipstream":
+        from apps.shipstream.agent import ShipStreamAgent
+        return ShipStreamAgent()
+    elif agent_name == "payguard":
+        from apps.payguard.agent import PayGuardAgent
+        return PayGuardAgent()
+    elif agent_name == "caredesk":
+        from apps.caredesk.agent import CareDeSkAgent
+        return CareDeSkAgent()
+    else:
+        raise ValueError(f"Unknown agent: {agent_name}")
+
+
+def extract_relevant_data(state: OrchestratorState) -> OrchestratorState:
+    """
+    Extract only relevant data from agent results.
+    Filters noise and keeps actionable information.
+    """
+    agent_results = state.get("agent_results", {})
+    relevant_data = {}
+    
+    for agent_name, result in agent_results.items():
+        if not result.get("success") or not result.get("data"):
+            continue
+        
+        data = result["data"]
+        if not isinstance(data, list):
+            data = [data]
+        
+        # Keep only most relevant fields per agent
+        filtered = []
+        for item in data[:5]:  # Limit to 5 items
+            relevant_item = extract_relevant_fields(item, agent_name)
+            if relevant_item:
+                filtered.append(relevant_item)
+        
+        if filtered:
+            relevant_data[agent_name] = filtered
+    
+    state["relevant_data"] = relevant_data
+    return state
+
+
+def extract_relevant_fields(item: Dict, agent_name: str) -> Dict:
+    """Extract only relevant fields based on agent type."""
+    if not item:
+        return None
+    
+    relevant = {}
+    
+    if agent_name == "shopcore":
+        # Order relevant fields
+        relevant_keys = ['order_id', 'product_name', 'status', 'total_amount', 'order_date', 'user_name']
+    elif agent_name == "shipstream":
+        # Shipment relevant fields
+        relevant_keys = ['tracking_number', 'status', 'current_location', 'estimated_arrival', 'tracking_events']
+    elif agent_name == "payguard":
+        # Transaction relevant fields
+        relevant_keys = ['transaction_id', 'type', 'status', 'amount', 'date', 'reference']
+    elif agent_name == "caredesk":
+        # Ticket relevant fields
+        relevant_keys = ['ticket_id', 'subject', 'status', 'priority', 'assigned_to', 'created_at']
+    else:
+        relevant_keys = list(item.keys())[:6]
+    
+    for key in relevant_keys:
+        if key in item and item[key] is not None:
+            relevant[key] = item[key]
+    
+    return relevant if relevant else None
+
+
+SYNTHESIS_PROMPT = """You are a helpful customer support assistant. 
+Based on the collected data, provide a clear, concise, and helpful response.
+
+IMPORTANT:
+- Be specific with order IDs, tracking numbers, dates
+- Format monetary values clearly
+- Highlight status and next steps
+- Keep response under 3-4 sentences for simple queries
+- Use bullet points for multiple items
+
+Collected Data:
+{data}
+
+User's Original Question: {query}
+
+Provide a natural, helpful response:"""
+
+
+def synthesize_response(state: OrchestratorState) -> OrchestratorState:
+    """
+    EXECUTING → ANSWERING transition
+    Synthesize a natural language response from relevant data.
+    """
+    start_time = time.time()
+    
+    # Extract relevant data first
+    state = extract_relevant_data(state)
+    
+    # Transition to ANSWERING state
+    state = transition_to_answering(state)
+    
+    relevant_data = state.get("relevant_data", {})
+    user_query = state["user_query"]
+    
+    if not relevant_data:
+        state["final_response"] = "I apologize, but I couldn't find relevant information for your query. Could you please provide more details?"
+        state = transition_to_complete(state)
+        return state
+    
+    try:
+        llm = get_llm()
+        
+        # Format data for synthesis
+        data_str = format_data_for_synthesis(relevant_data)
+        
+        response = llm.invoke([
+            SystemMessage(content="You are a helpful customer support assistant. Provide clear, specific answers."),
+            HumanMessage(content=SYNTHESIS_PROMPT.format(data=data_str, query=user_query))
+        ])
+        
+        state["final_response"] = response.content
         
     except Exception as e:
-        logger.error(f"Error synthesizing response: {e}")
-        
-        # Fallback response
-        return {
-            "final_response": "I apologize, but I'm having trouble processing your request right now. "
-                             "Please try again or contact our support team directly.",
-            "response_confidence": 0.3,
-            "status": "complete",
-            "end_time": datetime.utcnow().isoformat(),
-            "error_message": str(e),
-        }
-
-
-# ============================================================================
-# NODE: Handle Error
-# ============================================================================
-
-def handle_error(state: OrchestratorState) -> Dict[str, Any]:
-    """
-    Handle errors gracefully and return a user-friendly message.
-    """
-    logger.error(f"Handling error: {state.get('error_message')}")
+        logger.error(f"[ANSWERING] Synthesis error: {e}")
+        # Fallback to structured response
+        state["final_response"] = generate_fallback_response(relevant_data)
     
-    return {
-        "final_response": "I apologize, but I encountered an issue while processing your request. "
-                         f"Error: {state.get('error_message', 'Unknown error')}. "
-                         "Please try again or contact our support team.",
-        "status": "complete",
-        "end_time": datetime.utcnow().isoformat(),
-    }
+    state["execution_times"]["synthesis"] = (time.time() - start_time) * 1000
+    state["total_execution_time_ms"] = sum(state.get("execution_times", {}).values())
+    
+    # Transition to COMPLETE
+    state = transition_to_complete(state)
+    
+    logger.info(f"[COMPLETE] Total time: {state['total_execution_time_ms']:.0f}ms")
+    
+    return state
+
+
+def format_data_for_synthesis(relevant_data: Dict) -> str:
+    """Format relevant data for LLM synthesis."""
+    parts = []
+    
+    for agent_name, items in relevant_data.items():
+        parts.append(f"\n=== {agent_name.upper()} DATA ===")
+        for i, item in enumerate(items, 1):
+            parts.append(f"\nItem {i}:")
+            for key, value in item.items():
+                if value is not None:
+                    parts.append(f"  - {key}: {value}")
+    
+    return "\n".join(parts)
+
+
+def generate_fallback_response(relevant_data: Dict) -> str:
+    """Generate a fallback response when LLM synthesis fails."""
+    parts = ["Based on our records:"]
+    
+    for agent_name, items in relevant_data.items():
+        for item in items[:2]:
+            if agent_name == "shopcore":
+                parts.append(f"• Order {item.get('order_id', 'N/A')[:8]}...: {item.get('status', 'Unknown')} - ${item.get('total_amount', '0')}")
+            elif agent_name == "shipstream":
+                parts.append(f"• Shipment: {item.get('status', 'Unknown')} at {item.get('current_location', 'Unknown')}")
+            elif agent_name == "payguard":
+                parts.append(f"• Transaction: {item.get('type', 'Unknown')} - ${item.get('amount', '0')} ({item.get('status', 'Unknown')})")
+            elif agent_name == "caredesk":
+                parts.append(f"• Ticket: {item.get('status', 'Unknown')} - Assigned to {item.get('assigned_to', 'Unassigned')}")
+    
+    return "\n".join(parts)
+
+
+def handle_error(state: OrchestratorState) -> OrchestratorState:
+    """
+    Handle errors and transition to ERROR state.
+    """
+    error = state.get("error", "Unknown error occurred")
+    state = transition_to_error(state, error)
+    
+    state["final_response"] = f"I apologize, but I encountered an issue while processing your request. Error: {error}. Please try again or contact our support team."
+    
+    # Transition to COMPLETE even after error
+    state = transition_to_complete(state)
+    
+    return state
+
+
+# =============================================================================
+# ROUTING FUNCTIONS FOR LANGGRAPH
+# =============================================================================
+
+def should_continue_execution(state: OrchestratorState) -> str:
+    """Determine if execution should continue or synthesize."""
+    if state.get("error"):
+        return "error"
+    
+    if not state.get("agent_results"):
+        return "execute"
+    
+    return "synthesize"
+
+
+def route_after_analysis(state: OrchestratorState) -> str:
+    """Route after query analysis."""
+    if state.get("error"):
+        return "error"
+    
+    confidence = state.get("intent_confidence", 0)
+    if confidence < 0.2:
+        return "error"
+    
+    return "plan"

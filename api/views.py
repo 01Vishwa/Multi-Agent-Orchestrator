@@ -98,7 +98,6 @@ class ChatView(APIView):
             result = orchestrator.process_query(
                 query=message,
                 session_id=session_id,
-                user_id=user_id,
                 conversation_history=[]  # TODO: Load from storage
             )
             

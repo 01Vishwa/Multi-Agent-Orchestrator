@@ -1,189 +1,281 @@
 """
-LangGraph State Schema for Multi-Agent Orchestrator
+Advanced State Machine for Super Agent Orchestrator
 
-This module defines the typed state that flows through the LangGraph workflow.
-The state captures the entire lifecycle of a customer query from analysis to response.
+This module implements:
+1. State Machine with clear transitions (LISTENING → ROUTING → ANSWERING)
+2. Parallel agent execution for reduced latency
+3. Tool definitions for Django API access
+4. Relevant output extraction
 """
-from typing import TypedDict, List, Optional, Literal, Annotated, Any
-from operator import add
+from typing import TypedDict, List, Dict, Any, Optional, Literal
 from dataclasses import dataclass, field
-from datetime import datetime
+from enum import Enum
+import operator
+from langgraph.graph import add_messages
+from langchain_core.messages import BaseMessage
 
 
-class AgentResult(TypedDict):
-    """
-    Result returned by a sub-agent after execution.
-    """
-    agent_name: str              # Name of the agent (shopcore, shipstream, payguard, caredesk)
-    success: bool                # Whether the agent execution was successful
-    data: Any                    # Actual data returned (query results)
-    sql_query: Optional[str]     # The SQL query that was generated and executed
-    error: Optional[str]         # Error message if execution failed
-    execution_time_ms: int       # Time taken to execute in milliseconds
+class AgentState(str, Enum):
+    """Super Agent State Machine States"""
+    LISTENING = "listening"      # Receiving and parsing user input
+    ROUTING = "routing"          # Analyzing intent and routing to agents
+    EXECUTING = "executing"      # Agents processing queries
+    ANSWERING = "answering"      # Synthesizing final response
+    ERROR = "error"              # Error handling state
+    COMPLETE = "complete"        # Terminal state
 
 
-class EntityInfo(TypedDict):
-    """
-    Entity extracted from the user query.
-    """
-    entity_type: str            # Type: user_id, order_id, product_name, tracking_number, etc.
-    value: str                  # The actual value
-    confidence: float           # Confidence score 0-1
+@dataclass
+class AgentRequirement:
+    """Requirement for a specific agent"""
+    agent_name: str
+    reason: str
+    priority: int = 1  # 1=high, 2=medium, 3=low
+    depends_on: List[str] = field(default_factory=list)
+    required_context: List[str] = field(default_factory=list)
 
 
-class AgentTask(TypedDict):
-    """
-    A task to be executed by a specific agent.
-    """
-    agent_name: str             # Target agent
-    task_description: str       # Natural language description of what to do
-    depends_on: List[str]       # List of agent names this task depends on
-    context: dict               # Additional context from previous agent results
-    priority: int               # Execution priority (lower = higher priority)
+@dataclass  
+class ExecutionPlan:
+    """Execution plan with parallel batches"""
+    batches: List[List[str]]  # Agents grouped by execution order
+    dependencies: Dict[str, List[str]]
+    estimated_time_ms: int = 0
 
 
-class OrchestratorState(TypedDict):
+class EntityType(str, Enum):
+    """Types of entities that can be extracted"""
+    ORDER_ID = "order_id"
+    USER_ID = "user_id"
+    PRODUCT_NAME = "product_name"
+    TRACKING_NUMBER = "tracking_number"
+    TICKET_ID = "ticket_id"
+    TRANSACTION_ID = "transaction_id"
+    DATE_RANGE = "date_range"
+    AMOUNT = "amount"
+
+
+@dataclass
+class ExtractedEntity:
+    """Entity extracted from user query"""
+    entity_type: EntityType
+    value: str
+    confidence: float = 1.0
+    source: str = "user_query"
+
+
+class OrchestratorState(TypedDict, total=False):
     """
-    Complete state for the orchestrator workflow.
-    This state is passed through all nodes in the LangGraph.
-    """
-    # === Input ===
-    user_query: str                     # Original natural language query from user
-    session_id: str                     # Conversation session ID
-    user_id: Optional[str]              # User ID if authenticated
-    conversation_history: List[dict]    # Previous messages in conversation
+    Complete State Schema for the Super Agent Orchestrator.
     
-    # === Analysis Phase ===
-    intent: str                         # Detected intent (order_status, refund_check, ticket_status, etc.)
-    intent_confidence: float            # Confidence in intent detection
-    entities: List[EntityInfo]          # Extracted entities (product names, order IDs, etc.)
-    required_agents: List[str]          # Agents needed (shopcore, shipstream, payguard, caredesk)
+    State Machine Flow:
+    LISTENING → ROUTING → EXECUTING → ANSWERING → COMPLETE
+                  ↓
+                ERROR ────────────────────────→ COMPLETE
+    """
+    
+    # === Current State ===
+    current_state: AgentState
+    state_history: List[Dict[str, Any]]  # Audit trail of state transitions
+    
+    # === Input Phase (LISTENING) ===
+    user_query: str
+    session_id: str
+    conversation_history: List[BaseMessage]
+    timestamp: str
+    
+    # === Analysis Phase (ROUTING) ===
+    intent: str
+    intent_confidence: float
+    entities: List[ExtractedEntity]
+    required_agents: List[AgentRequirement]
+    complexity_score: int  # 1-10 scale
     
     # === Planning Phase ===
-    execution_plan: List[AgentTask]     # Ordered list of agent tasks
-    dependency_graph: dict              # Agent dependencies {agent: [depends_on]}
+    execution_plan: ExecutionPlan
+    parallel_batches: List[List[str]]  # Agents that can run in parallel
     
-    # === Execution Phase ===
-    current_step: int                   # Current step in execution plan
-    agent_results: Annotated[List[AgentResult], add]  # Results from all agents (accumulated)
-    pending_agents: List[str]           # Agents still to execute
-    completed_agents: List[str]         # Agents that have completed
+    # === Execution Phase (EXECUTING) ===
+    current_batch_index: int
+    agent_results: Dict[str, Dict[str, Any]]
+    accumulated_context: Dict[str, Any]
+    execution_times: Dict[str, float]  # Agent name → execution time in ms
     
-    # === Context Accumulation ===
-    accumulated_context: dict           # Context built up from agent results for subsequent agents
+    # === Output Phase (ANSWERING) ===
+    relevant_data: Dict[str, Any]  # Filtered, relevant data only
+    final_response: str
+    agents_used: List[str]
+    total_execution_time_ms: float
     
-    # === Output Phase ===
-    final_response: Optional[str]       # Synthesized natural language response
-    response_confidence: float          # Confidence in the response
-    
-    # === Metadata ===
-    status: Literal["initialized", "analyzing", "planning", "executing", "synthesizing", "complete", "error"]
-    error_message: Optional[str]        # Error message if status is 'error'
-    start_time: str                     # ISO timestamp when processing started
-    end_time: Optional[str]             # ISO timestamp when processing completed
-    total_tokens_used: int              # Total LLM tokens consumed
+    # === Error Handling ===
+    error: Optional[str]
+    error_agent: Optional[str]
+    retry_count: int
 
+
+# === State Transition Functions ===
+
+def transition_to_routing(state: OrchestratorState) -> OrchestratorState:
+    """Transition from LISTENING to ROUTING"""
+    state["current_state"] = AgentState.ROUTING
+    state["state_history"].append({
+        "from": AgentState.LISTENING,
+        "to": AgentState.ROUTING,
+        "trigger": "query_received"
+    })
+    return state
+
+
+def transition_to_executing(state: OrchestratorState) -> OrchestratorState:
+    """Transition from ROUTING to EXECUTING"""
+    state["current_state"] = AgentState.EXECUTING
+    state["state_history"].append({
+        "from": AgentState.ROUTING,
+        "to": AgentState.EXECUTING,
+        "trigger": "plan_created"
+    })
+    return state
+
+
+def transition_to_answering(state: OrchestratorState) -> OrchestratorState:
+    """Transition from EXECUTING to ANSWERING"""
+    state["current_state"] = AgentState.ANSWERING
+    state["state_history"].append({
+        "from": AgentState.EXECUTING,
+        "to": AgentState.ANSWERING,
+        "trigger": "execution_complete"
+    })
+    return state
+
+
+def transition_to_error(state: OrchestratorState, error: str) -> OrchestratorState:
+    """Transition to ERROR state"""
+    previous_state = state.get("current_state", AgentState.LISTENING)
+    state["current_state"] = AgentState.ERROR
+    state["error"] = error
+    state["state_history"].append({
+        "from": previous_state,
+        "to": AgentState.ERROR,
+        "trigger": "error_occurred",
+        "error": error
+    })
+    return state
+
+
+def transition_to_complete(state: OrchestratorState) -> OrchestratorState:
+    """Transition to terminal COMPLETE state"""
+    previous_state = state.get("current_state", AgentState.ANSWERING)
+    state["current_state"] = AgentState.COMPLETE
+    state["state_history"].append({
+        "from": previous_state,
+        "to": AgentState.COMPLETE,
+        "trigger": "response_ready"
+    })
+    return state
+
+
+# === State Initialization ===
 
 def create_initial_state(
     user_query: str,
     session_id: str,
-    user_id: Optional[str] = None,
-    conversation_history: Optional[List[dict]] = None
+    conversation_history: List[BaseMessage] = None
 ) -> OrchestratorState:
-    """
-    Create an initial state for a new query.
-    """
+    """Create initial state in LISTENING mode"""
+    from datetime import datetime
+    
     return OrchestratorState(
+        # Current State
+        current_state=AgentState.LISTENING,
+        state_history=[{
+            "to": AgentState.LISTENING,
+            "trigger": "session_start",
+            "timestamp": datetime.utcnow().isoformat()
+        }],
+        
         # Input
         user_query=user_query,
         session_id=session_id,
-        user_id=user_id,
         conversation_history=conversation_history or [],
+        timestamp=datetime.utcnow().isoformat(),
         
         # Analysis (to be filled)
         intent="",
         intent_confidence=0.0,
         entities=[],
         required_agents=[],
+        complexity_score=0,
         
-        # Planning (to be filled)
-        execution_plan=[],
-        dependency_graph={},
+        # Planning
+        execution_plan=None,
+        parallel_batches=[],
         
         # Execution
-        current_step=0,
-        agent_results=[],
-        pending_agents=[],
-        completed_agents=[],
-        
-        # Context
+        current_batch_index=0,
+        agent_results={},
         accumulated_context={},
+        execution_times={},
         
         # Output
-        final_response=None,
-        response_confidence=0.0,
+        relevant_data={},
+        final_response="",
+        agents_used=[],
+        total_execution_time_ms=0.0,
         
-        # Metadata
-        status="initialized",
-        error_message=None,
-        start_time=datetime.utcnow().isoformat(),
-        end_time=None,
-        total_tokens_used=0
+        # Error handling
+        error=None,
+        error_agent=None,
+        retry_count=0
     )
 
 
-# Intent categories for classification
-INTENT_CATEGORIES = [
-    "order_status",           # Where is my order?
-    "delivery_tracking",      # Track my package
-    "refund_status",          # Check refund status
-    "refund_request",         # Request a refund
-    "ticket_status",          # Check support ticket status
-    "ticket_create",          # Create a new ticket
-    "payment_issue",          # Payment problems
-    "wallet_balance",         # Check wallet balance
-    "product_inquiry",        # Product questions
-    "account_info",           # Account information
-    "general_query",          # General questions
-    "multi_domain",           # Complex queries spanning multiple domains
-]
+# === Parallel Execution Helpers ===
 
-# Agent capabilities mapping
-AGENT_CAPABILITIES = {
-    "shopcore": [
-        "order_status",
-        "product_inquiry",
-        "account_info",
-        "order_search",
-        "user_lookup",
-    ],
-    "shipstream": [
-        "delivery_tracking",
-        "shipment_status",
-        "warehouse_info",
-        "tracking_history",
-    ],
-    "payguard": [
-        "refund_status",
-        "refund_request",
-        "payment_issue",
-        "wallet_balance",
-        "transaction_history",
-    ],
-    "caredesk": [
-        "ticket_status",
-        "ticket_create",
-        "ticket_history",
-        "survey_feedback",
-    ],
-}
+def create_parallel_execution_plan(
+    required_agents: List[AgentRequirement]
+) -> ExecutionPlan:
+    """
+    Create execution plan with parallel batches.
+    
+    Groups agents by dependency level:
+    - Batch 0: Agents with no dependencies (run in parallel)
+    - Batch 1: Agents depending on Batch 0 (run in parallel after Batch 0)
+    - etc.
+    """
+    # Build dependency graph
+    dependencies = {req.agent_name: req.depends_on for req in required_agents}
+    all_agents = set(req.agent_name for req in required_agents)
+    
+    batches = []
+    scheduled = set()
+    
+    while scheduled != all_agents:
+        # Find agents whose dependencies are all satisfied
+        current_batch = []
+        for agent in all_agents - scheduled:
+            deps = dependencies.get(agent, [])
+            if all(dep in scheduled for dep in deps):
+                current_batch.append(agent)
+        
+        if not current_batch:
+            # Circular dependency or missing agent, schedule remaining
+            current_batch = list(all_agents - scheduled)
+        
+        batches.append(current_batch)
+        scheduled.update(current_batch)
+    
+    return ExecutionPlan(
+        batches=batches,
+        dependencies=dependencies,
+        estimated_time_ms=len(batches) * 500  # Rough estimate
+    )
 
-# Common dependency patterns
-DEPENDENCY_PATTERNS = {
-    # To check shipment, we often need order_id first
-    "shipstream": ["shopcore"],
-    # To check refund, we often need order_id first
-    "payguard": ["shopcore"],
-    # Ticket can reference orders, so might need order_id
-    "caredesk": ["shopcore"],
-}
+
+def get_agents_for_parallel_execution(
+    plan: ExecutionPlan,
+    batch_index: int
+) -> List[str]:
+    """Get list of agents that can be executed in parallel for a given batch"""
+    if batch_index < len(plan.batches):
+        return plan.batches[batch_index]
+    return []
