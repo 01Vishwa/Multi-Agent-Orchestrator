@@ -38,7 +38,6 @@
             overflow: hidden;
         }
 
-        /* Custom Scrollbar */
         ::-webkit-scrollbar {
             width: 8px;
             height: 8px;
@@ -58,7 +57,6 @@
             background: var(--primary);
         }
 
-        /* Header */
         .header {
             background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
             padding: 0.75rem 1.5rem;
@@ -126,7 +124,6 @@
             }
         }
 
-        /* Main Container */
         .container {
             flex: 1;
             display: flex;
@@ -139,7 +136,6 @@
             min-height: 0;
         }
 
-        /* Chat Area */
         .chat-container {
             flex: 1;
             display: flex;
@@ -171,7 +167,87 @@
             font-family: monospace;
         }
 
-        /* Messages Container - Scrollable */
+        /* Customer Selector */
+        .customer-selector {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border);
+            background: rgba(99, 102, 241, 0.1);
+            flex-shrink: 0;
+        }
+
+        .customer-selector label {
+            display: block;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.4rem;
+            text-transform: uppercase;
+        }
+
+        .customer-dropdown {
+            width: 100%;
+            padding: 0.6rem;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+
+        .customer-dropdown:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
+        }
+
+        .customer-info {
+            margin-top: 0.5rem;
+            padding: 0.5rem;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 6px;
+            font-size: 0.8rem;
+            display: none;
+        }
+
+        .customer-info.active {
+            display: block;
+        }
+
+        .customer-badge {
+            display: inline-block;
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.65rem;
+            font-weight: 600;
+            margin-left: 0.3rem;
+        }
+
+        .customer-badge.premium {
+            background: linear-gradient(135deg, #f59e0b, #d97706);
+            color: white;
+        }
+
+        .customer-stats {
+            display: flex;
+            gap: 1rem;
+            margin-top: 0.4rem;
+        }
+
+        .customer-stat {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .customer-stat-label {
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+        }
+
+        .customer-stat-value {
+            font-weight: 600;
+            color: var(--secondary);
+        }
+
         .messages {
             flex: 1;
             padding: 1rem;
@@ -265,7 +341,6 @@
             font-weight: 500;
         }
 
-        /* Structured Data Cards */
         .data-cards {
             display: flex;
             flex-direction: column;
@@ -365,7 +440,6 @@
             color: var(--secondary);
         }
 
-        /* Summary Card */
         .summary-card {
             background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(34, 211, 238, 0.1));
             border: 1px solid var(--primary);
@@ -379,7 +453,6 @@
             line-height: 1.6;
         }
 
-        /* Input Area */
         .input-container {
             padding: 0.75rem 1rem;
             border-top: 1px solid var(--border);
@@ -441,7 +514,6 @@
             transform: none;
         }
 
-        /* Sidebar */
         .sidebar {
             width: 280px;
             display: flex;
@@ -523,7 +595,6 @@
             color: var(--text-secondary);
         }
 
-        /* Example Queries */
         .example-queries {
             display: flex;
             flex-direction: column;
@@ -545,7 +616,6 @@
             border-color: var(--primary);
         }
 
-        /* Loading Animation */
         .typing-indicator {
             display: flex;
             gap: 4px;
@@ -585,7 +655,6 @@
             }
         }
 
-        /* Responsive */
         @media (max-width: 900px) {
             .container {
                 flex-direction: column;
@@ -628,19 +697,40 @@
                 <span class="session-id" id="sessionId">Session: generating...</span>
             </div>
 
+            <!-- Customer Selector -->
+            <div class="customer-selector">
+                <label for="customerSelect">👤 Select Customer</label>
+                <select id="customerSelect" class="customer-dropdown">
+                    <option value="">Loading customers...</option>
+                </select>
+                <div id="customerInfo" class="customer-info">
+                    <div id="customerName"></div>
+                    <div class="customer-stats">
+                        <div class="customer-stat">
+                            <span class="customer-stat-label">Orders</span>
+                            <span class="customer-stat-value" id="customerOrders">0</span>
+                        </div>
+                        <div class="customer-stat">
+                            <span class="customer-stat-label">Wallet</span>
+                            <span class="customer-stat-value" id="customerWallet">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="messages" id="messages">
                 <div class="message assistant">
                     <div class="message-avatar">🤖</div>
                     <div class="message-wrapper">
                         <div class="message-content">
-                            <strong>Hello!</strong> I'm your OmniLife support assistant. I can help you with:
+                            <strong>Hello!</strong> I'm your OmniLife support assistant. Please select a customer above
+                            to begin.
                             <ul style="margin: 0.5rem 0 0 1rem; padding: 0;">
                                 <li>Order status and tracking</li>
                                 <li>Refunds and payments</li>
                                 <li>Support tickets</li>
                                 <li>Product inquiries</li>
                             </ul>
-                            <p style="margin-top: 0.5rem;">How can I help you today?</p>
                         </div>
                     </div>
                 </div>
@@ -649,9 +739,9 @@
             <div class="input-container">
                 <div class="input-wrapper">
                     <input type="text" id="messageInput"
-                        placeholder="Ask about your order, delivery, refund, or support ticket..." />
+                        placeholder="Select a customer first, then ask about their orders..." disabled />
                 </div>
-                <button id="sendButton">
+                <button id="sendButton" disabled>
                     Send
                     <span>→</span>
                 </button>
@@ -697,19 +787,19 @@
                 <h3>💡 Try These Queries</h3>
                 <div class="example-queries">
                     <div class="example-query" onclick="useExample(this)">
-                        Where is my Gaming Monitor order?
+                        What are my recent orders?
                     </div>
                     <div class="example-query" onclick="useExample(this)">
-                        I need a refund for my last order
+                        Where is my latest shipment?
+                    </div>
+                    <div class="example-query" onclick="useExample(this)">
+                        Show my transaction history
                     </div>
                     <div class="example-query" onclick="useExample(this)">
                         Check my support ticket status
                     </div>
                     <div class="example-query" onclick="useExample(this)">
-                        Show my recent transactions
-                    </div>
-                    <div class="example-query" onclick="useExample(this)">
-                        My package is delayed, where is it?
+                        What's my wallet balance?
                     </div>
                 </div>
             </div>
@@ -717,24 +807,90 @@
     </main>
 
     <script>
-        // Configuration
         const API_BASE = '/api';
         let sessionId = generateSessionId();
+        let selectedCustomer = null;
+        let customers = [];
 
-        // DOM Elements
         const messagesContainer = document.getElementById('messages');
         const messageInput = document.getElementById('messageInput');
         const sendButton = document.getElementById('sendButton');
         const sessionIdDisplay = document.getElementById('sessionId');
+        const customerSelect = document.getElementById('customerSelect');
+        const customerInfo = document.getElementById('customerInfo');
 
-        // Initialize
         sessionIdDisplay.textContent = `Session: ${sessionId.slice(0, 8)}...`;
 
         function generateSessionId() {
             return 'sess_' + Math.random().toString(36).substring(2, 15);
         }
 
+        // Load customers on page load
+        async function loadCustomers() {
+            try {
+                const response = await fetch(`${API_BASE}/customers/`);
+                customers = await response.json();
+
+                customerSelect.innerHTML = '<option value="">-- Select a Customer --</option>';
+
+                customers.forEach((customer, index) => {
+                    const option = document.createElement('option');
+                    option.value = customer.id;
+                    const premiumBadge = customer.premium ? ' ⭐' : '';
+                    option.textContent = `${customer.name}${premiumBadge} (${customer.order_count} orders)`;
+                    customerSelect.appendChild(option);
+                });
+
+            } catch (error) {
+                console.error('Error loading customers:', error);
+                customerSelect.innerHTML = '<option value="">Error loading customers</option>';
+            }
+        }
+
+        // Handle customer selection
+        customerSelect.addEventListener('change', function () {
+            const customerId = this.value;
+
+            if (customerId) {
+                selectedCustomer = customers.find(c => c.id === customerId);
+
+                if (selectedCustomer) {
+                    // Update customer info display
+                    const nameHtml = `<strong>${selectedCustomer.name}</strong>
+                        ${selectedCustomer.premium ? '<span class="customer-badge premium">PREMIUM</span>' : ''}
+                        <br><span style="font-size: 0.7rem; color: var(--text-secondary)">${selectedCustomer.email}</span>`;
+                    document.getElementById('customerName').innerHTML = nameHtml;
+                    document.getElementById('customerOrders').textContent = selectedCustomer.order_count;
+                    document.getElementById('customerWallet').textContent =
+                        selectedCustomer.wallet ? `$${selectedCustomer.wallet.balance}` : 'N/A';
+                    customerInfo.classList.add('active');
+
+                    // Enable chat
+                    messageInput.disabled = false;
+                    sendButton.disabled = false;
+                    messageInput.placeholder = `Ask about ${selectedCustomer.name}'s orders, payments, or tickets...`;
+
+                    // Add welcome message
+                    addMessage(`Now chatting as <strong>${selectedCustomer.name}</strong>. I can help with their orders, shipments, payments, and support tickets.`, 'assistant');
+
+                    // Generate new session for this customer
+                    sessionId = `${customerId.slice(0, 8)}_${Date.now()}`;
+                    sessionIdDisplay.textContent = `Session: ${sessionId.slice(0, 12)}...`;
+                }
+            } else {
+                selectedCustomer = null;
+                customerInfo.classList.remove('active');
+                messageInput.disabled = true;
+                sendButton.disabled = true;
+                messageInput.placeholder = 'Select a customer first...';
+            }
+        });
+
         function useExample(element) {
+            if (!selectedCustomer) {
+                alert('Please select a customer first!');
+                return;
+            }
             messageInput.value = element.textContent.trim();
             messageInput.focus();
         }
@@ -743,7 +899,6 @@
             messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
 
-        // Format structured data from execution details
         function formatStructuredData(data, agents) {
             if (!data || !data.agent_results) return null;
 
@@ -754,7 +909,7 @@
 
                 const agentData = Array.isArray(result.data) ? result.data : [result.data];
 
-                for (const item of agentData.slice(0, 5)) {  // Limit to 5 items
+                for (const item of agentData.slice(0, 5)) {
                     const card = createDataCard(item, result.agent_name);
                     if (card) cards.push(card);
                 }
@@ -773,7 +928,6 @@
             let title = 'Record';
             let fields = [];
 
-            // Determine card type based on data
             if (item.order_id || item.product_name) {
                 icon = '🛒';
                 title = 'Order';
@@ -827,7 +981,6 @@
                     { label: 'Active', value: item.active ? 'Yes' : 'No' }
                 ];
             } else {
-                // Generic card
                 for (const [key, value] of Object.entries(item).slice(0, 6)) {
                     if (value != null && value !== '') {
                         fields.push({ label: formatLabel(key), value: String(value) });
@@ -835,7 +988,6 @@
                 }
             }
 
-            // Filter out null/empty fields
             fields = fields.filter(f => f.value != null && f.value !== '' && f.value !== 'null');
 
             if (fields.length === 0) return null;
@@ -872,14 +1024,8 @@
             if (!dateStr) return null;
             try {
                 const date = new Date(dateStr);
-                return date.toLocaleDateString('en-US', {
-                    month: 'short',
-                    day: 'numeric',
-                    year: 'numeric'
-                });
-            } catch {
-                return dateStr;
-            }
+                return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            } catch { return dateStr; }
         }
 
         function formatLabel(key) {
@@ -888,43 +1034,36 @@
 
         async function sendMessage() {
             const message = messageInput.value.trim();
-            if (!message) return;
+            if (!message || !selectedCustomer) return;
 
-            // Disable input
             messageInput.value = '';
             sendButton.disabled = true;
 
-            // Add user message
             addMessage(message, 'user');
 
-            // Show typing indicator
             const typingId = showTypingIndicator();
 
             try {
                 const response = await fetch(`${API_BASE}/chat/`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         message: message,
                         session_id: sessionId,
+                        user_id: selectedCustomer.id,
                         include_debug: true
                     })
                 });
 
                 const data = await response.json();
 
-                // Remove typing indicator
                 removeTypingIndicator(typingId);
 
-                // Format structured data if available
                 let structuredHtml = null;
                 if (data.execution_details) {
                     structuredHtml = formatStructuredData(data.execution_details, data.agents_used);
                 }
 
-                // Add assistant message with structured data
                 addMessage(data.response, 'assistant', data.agents_used, structuredHtml);
 
             } catch (error) {
@@ -954,9 +1093,7 @@
 
             let dataCardsHtml = '';
             if (structuredHtml) {
-                // Create summary from the text response (first 2 sentences)
                 const summaryText = content.split('.').slice(0, 2).join('.') + '.';
-
                 dataCardsHtml = `
                     <div class="summary-card">
                         <div class="summary-text">${summaryText}</div>
@@ -993,9 +1130,7 @@
                 <div class="message-wrapper">
                     <div class="message-content">
                         <div class="typing-indicator">
-                            <span></span>
-                            <span></span>
-                            <span></span>
+                            <span></span><span></span><span></span>
                         </div>
                     </div>
                 </div>
@@ -1010,24 +1145,13 @@
             if (indicator) indicator.remove();
         }
 
-        // Event listeners
         sendButton.addEventListener('click', sendMessage);
         messageInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') sendMessage();
         });
 
-        // Check health on load
-        async function checkHealth() {
-            try {
-                const response = await fetch(`${API_BASE}/health/`);
-                const data = await response.json();
-                console.log('Health check:', data);
-            } catch (error) {
-                console.error('Health check failed:', error);
-            }
-        }
-
-        checkHealth();
+        // Initialize
+        loadCustomers();
     </script>
 </body>
 

@@ -295,3 +295,62 @@ class HealthCheckView(APIView):
         }
         
         return Response(response_data, status=status.HTTP_200_OK)
+
+
+class CustomerListView(APIView):
+    """
+    Get list of customers for the frontend selector.
+    Returns up to 5 customers with their basic info.
+    """
+    permission_classes = [AllowAny]
+    
+    @extend_schema(
+        description="Get list of customers for selection",
+        responses={200: {"type": "array"}}
+    )
+    def get(self, request):
+        """
+        Get up to 5 customers for the selector dropdown.
+        """
+        from apps.shopcore.models import User
+        
+        try:
+            # Get 5 customers with order counts
+            customers = User.objects.all()[:5]
+            
+            customer_list = []
+            for user in customers:
+                # Get order count
+                order_count = user.orders.count()
+                
+                # Get wallet info if exists
+                wallet_info = None
+                try:
+                    from apps.payguard.models import Wallet
+                    wallet = Wallet.objects.filter(user_id=user.id).first()
+                    if wallet:
+                        wallet_info = {
+                            "balance": str(wallet.balance),
+                            "currency": wallet.currency
+                        }
+                except:
+                    pass
+                
+                customer_list.append({
+                    "id": str(user.id),
+                    "name": user.name,
+                    "email": user.email,
+                    "premium": user.premium_status,
+                    "order_count": order_count,
+                    "wallet": wallet_info
+                })
+            
+            return Response(customer_list, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error fetching customers: {e}")
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+

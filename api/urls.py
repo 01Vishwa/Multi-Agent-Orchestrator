@@ -7,6 +7,7 @@ from .views import (
     DirectAgentQueryView,
     ChatHistoryView,
     HealthCheckView,
+    CustomerListView,
 )
 
 app_name = 'api'
@@ -21,6 +22,10 @@ urlpatterns = [
     # Direct agent access (for debugging/testing)
     path('agents/query/', DirectAgentQueryView.as_view(), name='agent-query'),
     
+    # Customer list for frontend selector
+    path('customers/', CustomerListView.as_view(), name='customers'),
+    
     # Health check
     path('health/', HealthCheckView.as_view(), name='health'),
 ]
+
