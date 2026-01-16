@@ -1,0 +1,68 @@
+Problem Statement: The "Omni-Retail" Multi-Agent Orchestrator
+1. Background
+OmniLife is a comprehensive e-commerce conglomerate that manages the entire lifecycle of a customer's shopping experience through four distinct, interdependent software products. Currently, customer support is siloed; agents from one department (e.g., Logistics) cannot see data from another (e.g., Payments).
+OmniLife wants to unify this experience using Generative AI. The goal is to build a "Super Agent" that can interface with four specialized "Sub-Agents," each guarding a specific product database, to answer complex, multi-domain customer queries in real-time.
+2. The Challenge
+Design and implement a Hierarchical Multi-Agent System consisting of one Orchestrator (Super Agent) and four Specialized Agents.
+The Super Agent acts as the customer interface. It must parse natural language queries, decompose them into sub-tasks, delegate those tasks to the appropriate Sub-Agents, and synthesize the results into a coherent answer.
+The Sub-Agents are responsible for generating and executing SQL queries against their specific relational databases to retrieve raw data.
+3. The Data Ecosystem (4 Interdependent Products)
+You must generate synthetic data for the following four products. Each product has its own isolated relational database with a minimum of 3 tables.
+Product A: "ShopCore" (E-commerce Platform)
+Focus: User accounts, product catalog, and initial order placement.
+Database: DB_ShopCore
+Tables:
+Users (UserID, Name, Email, PremiumStatus)
+Products (ProductID, Name, Category, Price)
+Orders (OrderID, UserID, ProductID, OrderDate, Status)
+Product B: "ShipStream" (Logistics & Delivery)
+Focus: Physical movement of goods, warehouses, and tracking.
+Database: DB_ShipStream
+Tables:
+Shipments (ShipmentID, OrderID, TrackingNumber, EstimatedArrival)
+Warehouses (WarehouseID, Location, ManagerName)
+TrackingEvents (EventID, ShipmentID, WarehouseID, Timestamp, StatusUpdate)
+Dependency: Links to ShopCore via OrderID.
+Product C: "PayGuard" (FinTech & Transactions)
+Focus: Wallet management, payment processing, and refunds.
+Database: DB_PayGuard
+Tables:
+Wallets (WalletID, UserID, Balance, Currency)
+Transactions (TransactionID, WalletID, OrderID, Amount, Type [Debit/Refund])
+PaymentMethods (MethodID, WalletID, Provider, ExpiryDate)
+Dependency: Links to ShopCore via UserID and OrderID.
+Product D: "CareDesk" (Customer Support)
+Focus: Tickets, disputes, and customer satisfaction tracking.
+Database: DB_CareDesk
+Tables:
+Tickets (TicketID, UserID, ReferenceID [can be OrderID or TransID], IssueType)
+TicketMessages (MessageID, TicketID, Sender [User/Agent], Content)
+SatisfactionSurveys (SurveyID, TicketID, Rating, Comments)
+Dependency: Links to all other DBs via ReferenceID and UserID.
+
+4. Functional Requirements
+A. The Super Agent (Orchestrator)
+Must maintain conversation context.
+Must identify which Sub-Agents are needed for a query.
+Crucial: Must handle dependencies. (e.g., To check a refund status in PayGuard, the agent might first need to find the OrderID from ShopCore based on a product name provided by the user.)
+B. The Sub-Agents
+Each Sub-Agent is a "text-to-SQL" expert for its specific schema.
+They must return data in a structured format (JSON) that the Super Agent can parse.
+They cannot access databases other than their own.
+C. Required "Complex Query" Capabilities
+The system must successfully resolve queries that require at least 3 out of 4 databases to cooperate.
+Example Scenario:
+Customer: "I ordered a 'Gaming Monitor' last week, but it hasn't arrived. I opened a ticket about this yesterday. Can you tell me where the package is right now and if my ticket has been assigned to an agent?"
+Required Workflow:
+ShopCore Agent: Finds the OrderID for the 'Gaming Monitor' ordered by this user.
+ShipStream Agent: Uses that OrderID to find the TrackingEvents and current location.
+CareDesk Agent: Uses the UserID (or OrderID) to find the recent Ticket status.
+Super Agent: Combines these three data points into a helpful response.
+
+5. Deliverables
+Database Schemas: SQL scripts to create the 4 databases with sample dummy data.
+Agent Logic: Python/Node.js code implementing the Super Agent and 4 Sub-Agents 
+Demonstration: A log of 3 distinct customer queries showing the "thought process" of the Super Agent as it coordinates the Sub-Agents.
+
+
+Feel free to use any multiagent orchestration framework you want. Examples langgraph, google ADK, crew ai, autogen.
