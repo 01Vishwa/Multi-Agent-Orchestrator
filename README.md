@@ -2,6 +2,8 @@
 
 A Hierarchical Multi-Agent System for unified e-commerce customer support using Generative AI.
 
+![High-Level Architecture](docs/images/High-Level%20Architecture.png)
+
 ## Quick Start
 
 ```bash
@@ -38,31 +40,26 @@ python manage.py runserver 8000
 
 ---
 
-## Architecture
+## Module Hierarchy
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    SUPER AGENT                          │
-│              (Orchestrator + LangGraph)                 │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐    │
-│  │LISTENING│→ │ ROUTING │→ │EXECUTING│→ │ANSWERING│    │
-│  └─────────┘  └─────────┘  └─────────┘  └─────────┘    │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-       ┌───────────────┼───────────────┐
-       │               │               │
-       ▼               ▼               ▼
-┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-│ ShopCore │    │ShipStream│    │ PayGuard │    │ CareDesk │
-│  Agent   │    │  Agent   │    │  Agent   │    │  Agent   │
-└────┬─────┘    └────┬─────┘    └────┬─────┘    └────┬─────┘
-     │               │               │               │
-┌────▼─────┐    ┌────▼─────┐    ┌────▼─────┐    ┌────▼─────┐
-│  Orders  │    │Shipments │    │Payments  │    │ Tickets  │
-│ Products │    │ Tracking │    │ Wallets  │    │ Surveys  │
-│  Users   │    │Warehouses│    │ Methods  │    │ Messages │
-└──────────┘    └──────────┘    └──────────┘    └──────────┘
-```
+![Module Hierarchy](docs/images/Module%20Hierarchy.png)
+
+---
+
+## Screenshots
+
+### Homepage
+![Homepage](docs/images/sample_1_homepage.png)
+
+### Single Agent Query
+> "What are my recent orders?"
+
+![Single Agent Response](docs/images/sample_2_single_agent.png)
+
+### Multi-Agent Query  
+> "I ordered a Gaming Monitor but it hasn't arrived. Where is my package?"
+
+![Multi-Agent Response](docs/images/sample_3_multi_agent.png)
 
 ---
 
