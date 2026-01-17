@@ -279,19 +279,37 @@ AVAILABLE_TOOLS = [query_orders, query_shipments, query_transactions, query_tick
 ANALYSIS_PROMPT = """You are an intent classifier for a multi-system customer support platform.
 Analyze the user query and extract:
 
-1. **intent**: The primary intent (order_inquiry, delivery_tracking, refund_request, ticket_status, payment_history, general_inquiry)
+1. **intent**: The primary intent (order_inquiry, delivery_tracking, refund_request, ticket_status, combined_inquiry, general_inquiry)
 2. **intent_confidence**: Confidence score 0.0-1.0
 3. **entities**: List of extracted entities with type and value
-4. **required_agents**: List of agents needed with dependencies
+4. **required_agents**: List of ALL agents needed to fully answer the query
 
 Available agents:
-- shopcore: Orders, products, users
-- shipstream: Shipments, tracking, delivery (depends on shopcore for order_id)
-- payguard: Payments, refunds, wallets (depends on shopcore for user_id)
-- caredesk: Support tickets (depends on shopcore for user_id/order_id)
+- shopcore: Orders, products, users (START HERE for any order/product queries)
+- shipstream: Shipments, tracking, delivery (use when asking about delivery status, location, tracking)
+- payguard: Payments, refunds, wallets (use when asking about payment, refund, transaction)
+- caredesk: Support tickets (use when asking about ticket, support, agent assignment)
 
-For queries needing multiple agents, specify dependencies correctly.
-Example: "track my Gaming Monitor order" needs shopcore first (to get order_id), then shipstream.
+IMPORTANT: Many queries need MULTIPLE agents. Analyze carefully:
+- If query mentions "order" AND "shipment/delivery/arrived" → shopcore + shipstream
+- If query mentions "order" AND "ticket/support" → shopcore + caredesk
+- If query mentions "arrived" AND "ticket" AND "order" → shopcore + shipstream + caredesk (3 AGENTS!)
+- If query mentions "refund" → shopcore + payguard
+
+EXAMPLE 3-AGENT QUERY:
+Query: "I ordered a Gaming Monitor but it hasn't arrived. I opened a ticket. Where is my package and is my ticket assigned?"
+Response:
+{
+    "intent": "combined_inquiry",
+    "intent_confidence": 0.95,
+    "entities": [{"type": "product_name", "value": "Gaming Monitor"}],
+    "required_agents": [
+        {"agent": "shopcore", "reason": "Find Gaming Monitor order", "depends_on": []},
+        {"agent": "shipstream", "reason": "Get shipment location", "depends_on": ["shopcore"]},
+        {"agent": "caredesk", "reason": "Check ticket assignment", "depends_on": ["shopcore"]}
+    ],
+    "complexity": 8
+}
 
 Return JSON:
 {
@@ -314,7 +332,7 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
     OPTIMIZED with:
     1. Intent cache check (avoid repeat LLM calls)
     2. ORM-first pattern matching (60% skip LLM)
-    3. Reasoning chain capture (Chain-of-Thought)
+    3. Reasoning chain logging (Chain-of-Thought)
     4. Multi-intent decomposition
     """
     start_time = time.time()
@@ -325,9 +343,8 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
     user_query = state["user_query"]
     session_id = state.get("session_id", "default")
     
-    # Initialize reasoning chain for this query
+    # Initialize reasoning chain for logging (kept local, not stored in state)
     reasoning = create_reasoning_chain(user_query, session_id)
-    state["reasoning_chain"] = reasoning
     
     reasoning.start_step()
     reasoning.add_step(
@@ -368,13 +385,27 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
         
         state["execution_times"]["analysis"] = (time.time() - start_time) * 1000
         logger.info(f"[ROUTING] Cache hit! Agents: {cached.required_agents}")
+        logger.info(reasoning.get_summary())
         return state
     
-    # === OPTIMIZATION 2: ORM-first pattern matching ===
-    reasoning.start_step()
-    can_handle, pattern, extracted_entities = pattern_matcher.can_handle_with_orm(user_query)
+    # === EARLY MULTI-INTENT CHECK (before pattern matching) ===
+    # This prevents pattern matching from returning early with only 1 agent
+    # when the query actually needs multiple agents
+    is_multi = query_decomposer.is_multi_intent(user_query)
+    if is_multi:
+        logger.info(f"[ROUTING] Multi-intent query detected, skipping pattern matching")
+        # Jump directly to multi-intent decomposition below
     
-    if can_handle and pattern != QueryPattern.UNKNOWN:
+    # === OPTIMIZATION 2: ORM-first pattern matching (only for SINGLE intent) ===
+    can_handle = False
+    pattern = QueryPattern.UNKNOWN
+    extracted_entities = []
+    
+    if not is_multi:
+        reasoning.start_step()
+        can_handle, pattern, extracted_entities = pattern_matcher.can_handle_with_orm(user_query)
+    
+    if not is_multi and can_handle and pattern != QueryPattern.UNKNOWN:
         reasoning.add_step(
             ReasoningStep.PATTERN_MATCH,
             f"Pattern matched: {pattern.value}",
@@ -383,7 +414,6 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
             metadata={"pattern": pattern.value, "entities_found": len(extracted_entities)}
         )
         
-        # Determine agents from pattern
         agents_for_pattern = _get_agents_for_pattern(pattern)
         intent_for_pattern = _get_intent_for_pattern(pattern)
         
@@ -394,7 +424,6 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
             confidence=e.get("confidence", 0.8)
         ) for e in extracted_entities]
         
-        # Cache this result
         intent_cache.set(
             user_query, intent_for_pattern, 0.85,
             extracted_entities, agents_for_pattern, pattern
@@ -410,16 +439,9 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
         ) for agent in agents_for_pattern]
         state["complexity_score"] = 3
         
-        reasoning.add_step(
-            ReasoningStep.AGENT_SELECTION,
-            f"Selected agents based on pattern: {pattern.value}",
-            f"Agents: {agents_for_pattern}",
-            confidence=0.85,
-            metadata={"agents": agents_for_pattern}
-        )
-        
         state["execution_times"]["analysis"] = (time.time() - start_time) * 1000
         logger.info(f"[ROUTING] Pattern match! Agents: {agents_for_pattern}")
+        logger.info(reasoning.get_summary())
         return state
     
     # === OPTIMIZATION 3: Multi-intent decomposition ===
@@ -451,6 +473,7 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
         ) for agent in agents]
         
         state["execution_times"]["analysis"] = (time.time() - start_time) * 1000
+        logger.info(reasoning.get_summary())
         return state
     
     # === FALLBACK: LLM Intent Classification ===
@@ -476,7 +499,6 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
             state["intent"] = result.get("intent", "general_inquiry")
             state["intent_confidence"] = result.get("intent_confidence", 0.5)
             
-            # Extract entities
             entities = []
             for entity in result.get("entities", []):
                 entity_type = entity.get("type", "unknown")
@@ -491,7 +513,6 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
                 ))
             state["entities"] = entities
             
-            # Extract required agents
             required_agents = []
             for agent in result.get("required_agents", []):
                 required_agents.append(AgentRequirement(
@@ -502,7 +523,6 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
             state["required_agents"] = required_agents
             state["complexity_score"] = result.get("complexity", 5)
             
-            # Cache the LLM result for future
             entity_dicts = [{"type": e.entity_type.value, "value": e.value, "confidence": e.confidence} 
                           for e in entities]
             intent_cache.set(
@@ -527,7 +547,6 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
             confidence=0.3,
             metadata={"error": str(e)}
         )
-        # Fallback to shopcore
         state["intent"] = "general_inquiry"
         state["intent_confidence"] = 0.3
         state["required_agents"] = [AgentRequirement(
@@ -538,8 +557,6 @@ def analyze_query(state: OrchestratorState) -> OrchestratorState:
     
     state["execution_times"]["analysis"] = (time.time() - start_time) * 1000
     logger.info(f"[ROUTING] Identified agents: {[a.agent_name for a in state.get('required_agents', [])]}")
-    
-    # Log reasoning summary
     logger.info(reasoning.get_summary())
     
     return state
