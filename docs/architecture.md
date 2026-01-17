@@ -1,137 +1,185 @@
-# OmniLife Multi-Agent Orchestrator - Architecture Documentation
+# System Architecture
 
-## High-Level System Architecture
+## High-Level Architecture
 
 ```mermaid
 graph TB
-    subgraph "Frontend Layer"
-        UI[Chat UI<br/>index.html]
+    subgraph "Client Layer"
+        WEB[Web Browser]
     end
     
     subgraph "API Layer"
-        API[Django REST API<br/>/api/]
-        API --> |POST /chat/| CHAT[ChatView]
-        API --> |GET /customers/| CUST[CustomerListView]
-        API --> |GET /health/| HEALTH[HealthCheckView]
+        API[Django REST API]
     end
     
     subgraph "Orchestration Layer"
-        ORCH[Super Agent<br/>LangGraph Orchestrator]
-        CACHE[Intent Cache<br/>LRU + TTL]
-        REASON[Reasoning Chain<br/>Chain-of-Thought]
+        ORCH[Super Agent<br/>LangGraph StateGraph]
+        CACHE[Intent Cache]
+        PATTERN[Pattern Matcher]
+        MEM[Memory Saver]
     end
     
     subgraph "Agent Layer"
-        SC[ShopCore Agent<br/>Orders, Products]
-        SS[ShipStream Agent<br/>Shipping, Tracking]
-        PG[PayGuard Agent<br/>Payments, Refunds]
-        CD[CareDesk Agent<br/>Tickets, Support]
+        SC[ShopCore Agent]
+        SS[ShipStream Agent]
+        PG[PayGuard Agent]
+        CD[CareDesk Agent]
     end
     
-    subgraph "Database Layer"
-        DB1[(DB_ShopCore<br/>Users, Products, Orders)]
-        DB2[(DB_ShipStream<br/>Shipments, Warehouses)]
-        DB3[(DB_PayGuard<br/>Wallets, Transactions)]
-        DB4[(DB_CareDesk<br/>Tickets, Messages)]
+    subgraph "AI Layer"
+        LLM[GPT-4o<br/>GitHub Models API]
     end
     
-    UI --> API
-    CHAT --> ORCH
+    subgraph "Data Layer"
+        DB[(SQLite Database)]
+    end
+    
+    WEB -->|HTTP POST| API
+    API --> ORCH
     ORCH --> CACHE
-    ORCH --> REASON
-    ORCH --> SC & SS & PG & CD
-    SC --> DB1
-    SS --> DB2
-    PG --> DB3
-    CD --> DB4
+    ORCH --> PATTERN
+    ORCH --> MEM
+    ORCH -->|Parallel| SC & SS & PG & CD
+    SC & SS & PG & CD --> LLM
+    SC & SS & PG & CD --> DB
 ```
 
 ---
 
-## Component Architecture
-
-```mermaid
-graph LR
-    subgraph "apps/orchestrator/"
-        G[graph.py<br/>LangGraph Workflow]
-        N[nodes.py<br/>Graph Nodes]
-        S[state.py<br/>State Machine]
-        C[cache.py<br/>Intent Caching]
-        R[reasoning.py<br/>Chain-of-Thought]
-        T[tools.py<br/>MCP Tools]
-        CTX[context.py<br/>Context Management]
-    end
-    
-    G --> N
-    N --> S
-    N --> C
-    N --> R
-    N --> T
-```
-
----
-
-## State Machine Architecture
+## State Machine
 
 ```mermaid
 stateDiagram-v2
     [*] --> LISTENING: Session Start
-    
     LISTENING --> ROUTING: Query Received
-    note right of ROUTING: Analyze intent, extract entities
-    
     ROUTING --> EXECUTING: Plan Created
-    note right of EXECUTING: Run agents in parallel batches
-    
-    EXECUTING --> ANSWERING: Data Collected
-    note right of ANSWERING: Synthesize response
-    
+    ROUTING --> ERROR: Low Confidence
+    EXECUTING --> ANSWERING: Execution Complete
+    EXECUTING --> ERROR: Agent Failure
     ANSWERING --> COMPLETE: Response Ready
-    
-    ROUTING --> ERROR: Analysis Failed
-    EXECUTING --> ERROR: Agent Failed
-    ERROR --> COMPLETE: Fallback Response
-    
+    ERROR --> COMPLETE: Error Handled
     COMPLETE --> [*]
 ```
 
 ---
 
-## Technology Stack
+## Tech Stack
 
-| Layer | Technology |
-|-------|------------|
-| Frontend | HTML, CSS, JavaScript |
-| API | Django REST Framework |
-| Orchestration | LangGraph + LangChain |
-| LLM | GitHub Models API (GPT-4.1) |
-| Database | SQLite (Django ORM) |
-| Caching | In-memory LRU |
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| **Frontend** | HTML/CSS/JavaScript | Web chat interface |
+| **API** | Django REST Framework | HTTP endpoints |
+| **Orchestrator** | LangGraph | State machine, workflow |
+| **Agents** | LangChain | Text-to-SQL generation |
+| **LLM** | GPT-4o (GitHub Models) | Intent classification, SQL generation |
+| **Database** | SQLite | 4 virtual databases |
+| **Caching** | In-memory LRU | Intent caching |
 
 ---
 
-## File Structure
+## Component Diagram
+
+```mermaid
+graph LR
+    subgraph "apps/orchestrator/"
+        graph.py[graph.py<br/>LangGraph Workflow]
+        nodes.py[nodes.py<br/>Node Functions]
+        state.py[state.py<br/>State Schema]
+        cache.py[cache.py<br/>Intent Cache]
+        reasoning.py[reasoning.py<br/>Chain of Thought]
+    end
+    
+    subgraph "apps/shopcore/"
+        sc_agent[agent.py]
+        sc_models[models.py]
+    end
+    
+    subgraph "apps/shipstream/"
+        ss_agent[agent.py]
+        ss_models[models.py]
+    end
+    
+    subgraph "apps/payguard/"
+        pg_agent[agent.py]
+        pg_models[models.py]
+    end
+    
+    subgraph "apps/caredesk/"
+        cd_agent[agent.py]
+        cd_models[models.py]
+    end
+    
+    graph.py --> nodes.py
+    nodes.py --> state.py
+    nodes.py --> cache.py
+    nodes.py --> sc_agent & ss_agent & pg_agent & cd_agent
+```
+
+---
+
+## Database Schema
+
+```mermaid
+erDiagram
+    USER ||--o{ ORDER : places
+    USER ||--o| WALLET : has
+    USER ||--o{ TICKET : creates
+    
+    PRODUCT ||--o{ ORDER : contains
+    ORDER ||--o| SHIPMENT : ships
+    ORDER ||--o{ TRANSACTION : pays
+    
+    SHIPMENT ||--o{ TRACKING_EVENT : logs
+    WAREHOUSE ||--o{ TRACKING_EVENT : processes
+    
+    WALLET ||--o{ TRANSACTION : records
+    WALLET ||--o{ PAYMENT_METHOD : stores
+    
+    TICKET ||--o{ TICKET_MESSAGE : contains
+    TICKET ||--o| SATISFACTION_SURVEY : receives
+```
+
+---
+
+## Parallel Execution
+
+```mermaid
+gantt
+    title Agent Execution Timeline
+    dateFormat X
+    axisFormat %L ms
+    
+    section Batch 1
+    ShopCore :0, 500
+    
+    section Batch 2
+    ShipStream :500, 1000
+    CareDesk :500, 1000
+    PayGuard :500, 1000
+    
+    section Synthesis
+    Response :1000, 1200
+```
+
+---
+
+## Files Structure
 
 ```
-Omni-Retail-Multi-Agent-Orchestrator/
-├── api/                    # REST API
-│   ├── views.py           # API endpoints
-│   ├── serializers.py     # Request/response schemas
-│   └── urls.py            # URL routing
+e:\Omni-Retail-Multi-Agent-Orchestrator\
 ├── apps/
-│   ├── core/              # Shared utilities
-│   ├── orchestrator/      # Super Agent
-│   │   ├── graph.py       # LangGraph workflow
-│   │   ├── nodes.py       # Graph nodes
-│   │   ├── state.py       # State machine
-│   │   ├── cache.py       # Intent caching
-│   │   ├── reasoning.py   # Chain-of-thought
-│   │   └── tools.py       # MCP tools
-│   ├── shopcore/          # E-commerce agent
-│   ├── shipstream/        # Logistics agent
-│   ├── payguard/          # Payment agent
-│   └── caredesk/          # Support agent
-├── config/                # Django settings
-├── templates/             # HTML templates
-└── scripts/               # Utility scripts
+│   ├── orchestrator/     # Super Agent
+│   │   ├── graph.py      # LangGraph workflow
+│   │   ├── nodes.py      # Node functions
+│   │   ├── state.py      # State schema
+│   │   ├── cache.py      # Intent caching
+│   │   └── reasoning.py  # Chain of thought
+│   ├── shopcore/         # E-commerce Agent
+│   ├── shipstream/       # Logistics Agent
+│   ├── payguard/         # Payments Agent
+│   └── caredesk/         # Support Agent
+├── api/                  # REST endpoints
+├── docs/                 # Documentation
+├── scripts/              # Data generation
+└── templates/            # Web UI
 ```
