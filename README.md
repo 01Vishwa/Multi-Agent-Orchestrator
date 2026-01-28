@@ -1,4 +1,4 @@
-# OmniLife Multi-Agent Orchestrator
+# Multi-Agent Orchestrator
 
 A Hierarchical Multi-Agent System for unified e-commerce customer support using Generative AI.
 
